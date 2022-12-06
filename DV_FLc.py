@@ -42,6 +42,10 @@ parser.add_argument('--log_rate', type=float, default=0.1)
 parser.add_argument('--larg_lr', action='store_true') # default: false
 parser.add_argument('--KD', action='store_true') # default: false
 
+parser.add_argument('--full_condition', action='store_true') # default: false
+parser.add_argument('--worst_three', action='store_true') # default: false
+parser.add_argument('--flex_num', type=int, default=5, help="0:0~4 min(tc+args.flex_num,5)")
+
 parser.add_argument('--model_set', type=int, default=2)
 parser.add_argument('--model_name', type=str, default='resnet56') # 34, 56, 110
 parser.add_argument('--wandb', type=bool, default=True)
@@ -58,26 +62,6 @@ args = parser.parse_args()
 
 device = torch.device('cuda:' + str(args.gpu) if torch.cuda.is_available() else 'cpu')
 
-
-def accuracy(model, dataset_loader):
-    total_correct = 0
-    for x, y in dataset_loader:
-        x = x.to(device)
-        y = one_hot(np.array(y.numpy()), 10)
-
-        target_class = np.argmax(y, axis=1)
-        predicted_class = np.argmax(model(x).cpu().detach().numpy(), axis=1)
-        total_correct += np.sum(predicted_class == target_class)
-    return total_correct / len(dataset_loader.dataset)
-
-def agg_index(full_stepSize, s2D):
-    agg_user_indices = [[[] for __ in range(len(full_stepSize[0]))] for _ in range(len(full_stepSize))]
-    for i in range(len(full_stepSize)): # 3
-        for j in range(len(full_stepSize[0])): # 5
-            for ui in range(len(s2D)):
-                if s2D[ui][i][j]:
-                    agg_user_indices[i][j].append(ui)
-    return agg_user_indices
 
 def embed_param(w_glob, BN): # BN layer은 해당 p에 저장된 것을 가져옴
     w_sub = copy.deepcopy(w_glob)
@@ -97,7 +81,7 @@ def main():
         os.makedirs(fileName)        
 
     if args.wandb:
-        run = wandb.init(dir=fileName, project='DVBN-FL-R56', name= str(args.name)+ str(args.rs), reinit=True)
+        run = wandb.init(dir=fileName, project='DVBN-FL-R56-1206', name= str(args.name)+ str(args.rs), reinit=True)
         wandb.config.update(args)
     
     if args.model_name == 'resnet32':
@@ -193,8 +177,10 @@ def main():
             lr = lr*0.1
             print(lr)
 
-        idxs_users = np.random.choice(range(args.num_users), m, replace=False)
-        # idxs_users = np.random.choice(range(40,args.num_users), 6,replace=False)
+        if args.worst_three:
+            idxs_users = np.random.choice(range(40,args.num_users), 6,replace=False)
+        else:
+            idxs_users = np.random.choice(range(args.num_users), m, replace=False)
         loss_locals = []
        
         w_locals = []
@@ -216,8 +202,10 @@ def main():
                 ss = s2D[c][model_choice]
                 num_submodel[c] += 1
             else: # normal
-                tc = idx//(args.num_users//submodel_num)
-                # tc = 0
+                if args.full_condition:
+                    tc = 0
+                else:
+                    tc = idx//(args.num_users//submodel_num)
                 '''
                 tc: 0,1,2,3,4 (maximum performance of a user)
                 tc = 0 # every device has full condition
@@ -229,10 +217,11 @@ def main():
                     submodel 0 can execute all submodels (0 ~ 4)
                     0: 0,1,2 / 1: 1,2,3 / 2: 2,3,4 / 3: 3,4 / 4: 4
                     '''
-                    # c = random.choice(list(range(tc,5)))
-                    # c = random.choice(list(range(tc,min(tc+2,5))))
+                    c = random.choice(list(range(tc,5)))
+                    if args.limit_num:
+                        c = random.choice(list(range(tc,min(tc+args.flex_num,5))))
                     # c = random.choice(list(range(max(0,tc-2),tc+1)))
-                    c = random.choice(list(range(max(2,tc-2),tc+1)))
+                    # c = random.choice(list(range(max(2,tc-2),tc+1)))
                 else:
                     '''
                     a user executes its largest model that is executable

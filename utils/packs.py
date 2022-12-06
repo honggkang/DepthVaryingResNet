@@ -5,6 +5,27 @@ import numpy as np
 
 import logging
 
+def accuracy(model, dataset_loader):
+    total_correct = 0
+    for x, y in dataset_loader:
+        x = x.to(device)
+        y = one_hot(np.array(y.numpy()), 10)
+
+        target_class = np.argmax(y, axis=1)
+        predicted_class = np.argmax(model(x).cpu().detach().numpy(), axis=1)
+        total_correct += np.sum(predicted_class == target_class)
+    return total_correct / len(dataset_loader.dataset)
+
+def agg_index(full_stepSize, s2D):
+    agg_user_indices = [[[] for __ in range(len(full_stepSize[0]))] for _ in range(len(full_stepSize))]
+    for i in range(len(full_stepSize)): # 3
+        for j in range(len(full_stepSize[0])): # 5
+            for ui in range(len(s2D)):
+                if s2D[ui][i][j]:
+                    agg_user_indices[i][j].append(ui)
+    return agg_user_indices
+
+
 def get_logger(logpath, filepath, package_files=[], displaying=True, saving=True, debug=False):
     logger = logging.getLogger()
     if debug:
