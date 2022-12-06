@@ -3,10 +3,12 @@ import argparse
 import logging
 import numpy as np
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
-import numpy as np
+from datetime import datetime
+from random import randint
 import wandb
 
 import ssl
@@ -18,10 +20,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--nepochs', type=int, default=1000)
 parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--data_aug', type=bool, default=True)
+parser.add_argument('--batch_size', type=int, default=128)
+parser.add_argument('--lr', type=float, default=0.1)
+
 parser.add_argument('-s', '--step_size_list', type=int, nargs='+', action='append', default=None)
 # [[1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1, 1, 1], [1, 1, 1]]
 # -s 1 1 1 -s 1 2 0 1 -s 1 2 0 2 0 1 -s 1 1 1 
-parser.add_argument('--save', type=str, default='./resnet34-full')
+parser.add_argument('--save', type=str, default='./resnet34_')
 args = parser.parse_args()
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -171,11 +176,26 @@ def get_logger(logpath, filepath, package_files=[], displaying=True, saving=True
 
     return logger
 
-def get_cifar_loaders(data_aug=False, batch_size=128, test_batch_size=1000, perc=1.0):
+
+def learning_rate_with_decay(batch_size, batches_per_epoch, boundary_epochs, decay_rates):
+    initial_learning_rate = args.lr
+
+    boundaries = [int(batches_per_epoch * epoch) for epoch in boundary_epochs]
+    vals = [initial_learning_rate * decay for decay in decay_rates]
+
+    def learning_rate_fn(itr):
+        lt = [itr < b for b in boundaries] + [True]
+        i = np.argmax(lt)
+        return vals[i]
+
+    return learning_rate_fn
+
+
+def get_cifar_loaders(data_aug=False, batch_size=128, test_batch_size=1000):
     if data_aug:
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
-            transforms.RandomVerticalFlip(p=0.5),
+            # transforms.RandomVerticalFlip(p=0.5),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
@@ -249,43 +269,60 @@ else:
 # stepSizes[2][3] = 2
 # stepSizes[2][4] = 0
 
-wandb.init(dir='/data/depthNet')
+timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+fileName = args.save + timestamp + '_' + str(randint(0,100))
+
+wandb.init(dir='/data/depthNet', project='DepthVarying', name=str(stepSizes) + timestamp)
 wandb.config.update(args)
 
-if not os.path.exists(args.save):
-    os.makedirs(args.save)
+if not os.path.exists(fileName):
+    os.makedirs(fileName)
 
 device = torch.device('cuda:' + str(args.gpu) if torch.cuda.is_available() else 'cpu')
 model = resnet34(stepSizes).to(device)
 wandb.watch(model)
 criterion = nn.CrossEntropyLoss().to(device)
-optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9, weight_decay=5e-4)
+optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
 
-train_loader, test_loader, train_eval_loader = get_cifar_loaders(args.data_aug)
+
+train_loader, test_loader, train_eval_loader = get_cifar_loaders(args.data_aug, args.batch_size)
 data_gen = inf_generator(train_loader)
 batches_per_epoch = len(train_loader)
 model.train()
 
+lr_fn = learning_rate_with_decay(
+    args.batch_size, batches_per_epoch=batches_per_epoch, boundary_epochs=[70, 120, 160],
+    decay_rates = [1, 0.1, 0.01, 0.001]
+)
+
 best_acc = 0
+logger = get_logger(logpath=os.path.join(fileName, 'logs'), filepath=os.path.abspath(__file__))
+logger.info(args)
+
 for itr in range(args.nepochs * batches_per_epoch):
 
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr_fn(itr)
+
+    optimizer.zero_grad()
     inputs, labels = data_gen.__next__()
     inputs = inputs.to(device)
     labels = labels.to(device)
-    optimizer.zero_grad()
     outputs = model(inputs)
     loss = criterion(outputs, labels)
     loss.backward()
     optimizer.step()
     
     if itr % batches_per_epoch == 0:
+        print(optimizer.param_groups[0]['lr'])
         with torch.no_grad():
             model.eval()
             train_acc = accuracy(model, train_eval_loader)
             val_acc = accuracy(model, test_loader)
-            print("Epoch {:04d} | Train Acc {:.4} | Test ACC {:.4}".format(itr//batches_per_epoch, train_acc, val_acc))
+            logger.info("Epoch {:04d} | Train Acc {:.4} | Test ACC {:.4}".format(itr//batches_per_epoch, train_acc, val_acc))
             if val_acc > best_acc:
-                torch.save({'state_dict': model.state_dict(), 'args': args}, os.path.join(args.save, 'model.pth'))
+                modelName = 'model' + str(itr//batches_per_epoch) + '.pth'
+                torch.save({'state_dict': model.state_dict(), 'args': args}, os.path.join(fileName, modelName))
                 best_acc = val_acc
             wandb.log({
                 "Epoch": itr//batches_per_epoch,
@@ -293,3 +330,5 @@ for itr in range(args.nepochs * batches_per_epoch):
                 "Test acc": val_acc
             })
             model.train()
+
+logger.info("best acc {:.4}".format(best_acc))
