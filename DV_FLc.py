@@ -44,7 +44,9 @@ parser.add_argument('--KD', action='store_true') # default: false
 
 parser.add_argument('--full_condition', action='store_true') # default: false
 parser.add_argument('--worst_three', action='store_true') # default: false
-parser.add_argument('--flex_num', type=int, default=5, help="0:0~4 min(tc+args.flex_num,5)")
+parser.add_argument('--noFL', action='store_true', help='all dataset') # default: false
+parser.add_argument('--min_flex_num', type=int, default=0, help="0:0~ max(0,tc-args.min_flex_num)")
+parser.add_argument('--max_flex_num', type=int, default=4, help="0:~4 min(tc+args.max_flex_num+1,5)")
 
 parser.add_argument('--model_set', type=int, default=2)
 parser.add_argument('--model_name', type=str, default='resnet56') # 34, 56, 110
@@ -76,9 +78,9 @@ def embed_param(w_glob, BN): # BN layer은 해당 p에 저장된 것을 가져�
 def main():
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     fileName = args.save + str(args.submodels) + '/resnet56_cifar_' + timestamp + '_' + str(args.rs)
-    
+
     if not os.path.exists(fileName):
-        os.makedirs(fileName)        
+        os.makedirs(fileName)
 
     if args.wandb:
         run = wandb.init(dir=fileName, project='DVBN-FL-R56-1206', name= str(args.name)+ str(args.rs), reinit=True)
@@ -161,7 +163,7 @@ def main():
             
     dataset_train, dataset_test = get_fl_cifar_datasets()
     dict_users = cifar_iid(dataset_train, args.num_users, args.rs)
-        
+    all_users = cifar_iid(dataset_train, 1, args.rs)
     logger = get_logger(logpath=os.path.join(fileName, 'logs'), filepath=os.path.abspath(__file__))
     logger.info(args)
     lr = args.lr
@@ -217,9 +219,7 @@ def main():
                     submodel 0 can execute all submodels (0 ~ 4)
                     0: 0,1,2 / 1: 1,2,3 / 2: 2,3,4 / 3: 3,4 / 4: 4
                     '''
-                    c = random.choice(list(range(tc,5)))
-                    if args.limit_num:
-                        c = random.choice(list(range(tc,min(tc+args.flex_num,5))))
+                    c = random.choice(list(range(max(0,tc-args.min_flex_num), min(tc+args.max_flex_num+1,5))))
                     # c = random.choice(list(range(max(0,tc-2),tc+1)))
                     # c = random.choice(list(range(max(2,tc-2),tc+1)))
                 else:
@@ -253,7 +253,11 @@ def main():
                 # w_locals.append(copy.deepcopy(w_t))
                 w_locals.append(copy.deepcopy(w_s))
             else:
-                local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
+                if args.noFL:
+                    local = LocalUpdate(args=args, dataset=dataset_train, idxs=all_users[0])
+                else:
+                    local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
+                    
                 w, BN_s, loss = local.train(net=local_models[c][model_choice], learning_rate=lr)
                 w_locals.append(copy.deepcopy(w))
             
@@ -268,7 +272,7 @@ def main():
         w_glob = DVAvg(w_glob, w_locals, com_layers, sing_layers, subs2D)
         model.load_state_dict(w_glob)
 
-                
+
         loss_avg = sum(loss_locals) / len(loss_locals)
         print("round:{}, loss: {}".format(itr, loss_avg))
 
@@ -359,22 +363,16 @@ def main():
     if args.larg_lr:
         lr = 10*lr
 
-    all_users = cifar_iid(dataset_train, 1, args.rs)
-
-    for i in range(st, en):
+    for i in range(st, en):  # model class index
         w_local_glob = copy.deepcopy(w_glob)
         
-        for itrf in range(args.nftrounds):
-            # if itrf == args.nftrounds/2:
-            #     lrl = lrl*0.1
-            if args.larg_lr:
-                if itrf == args.nftrounds/2:
-                    lr = 0.1*lr
+        for itrf in range(args.nftrounds):  # fine-tuning rounds
 
             if args.mode == 'best':
                 idxs_users = np.random.choice(range(args.num_users), m, replace=False)
             else:
                 idxs_users = np.random.choice(range(0, (i+1)*20), (i+1)*2, replace=False) # range(0,3): 0~2
+            
             subs2D = []
             w_locals = []
             for idx in idxs_users:
@@ -389,8 +387,11 @@ def main():
                 # local_models[c][model_choice].load_state_dict(w_glob)
                 local_models[i][model_choice].train()
 
-                local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
-                # local = LocalUpdate(args=args, dataset=dataset_train, idxs=all_users[0])
+                if args.noFL:
+                    local = LocalUpdate(args=args, dataset=dataset_train, idxs=all_users[0])
+                else:
+                    local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
+                
                 w, BN_s, loss = local.train(net=local_models[i][model_choice], learning_rate=lr)
                 w_locals.append(copy.deepcopy(w))
                 loss_locals.append(copy.deepcopy(loss))
@@ -420,8 +421,9 @@ def main():
                     "Communication round": itr+itrf+2,
                     "Local model (sBN-F) " + str(i) + "-" + str(0) + " test accuracy": local_acc_test
                 })
-        if args.wandb:
-            run.finish()
+
+    if args.wandb:
+        run.finish()
 
     
     return
@@ -437,4 +439,3 @@ if __name__ == "__main__":
         random.seed(args.rs)
         main()
         args.rs = args.rs+1
-
