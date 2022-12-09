@@ -460,7 +460,7 @@ def cifar_iid_all(dataset, num_users):
         # all_idxs = list(set(all_idxs) - dict_users[i])
     return dict_users
 
-def get_fl_svhn_datasets(data_aug=False, batch_size=128, test_batch_size=1000):
+def get_fl_svhn_datasets():
     
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -691,6 +691,19 @@ def DVAvg(prev_w, w, common_layers, singular_layers, s2Ds):
             w_avg[k] = prev_w[k]
                 
     return w_avg
+
+def BNAvg(BNs_of_particular_c):
+    BN_avg = copy.deepcopy(BNs_of_particular_c[0])
+    if len(BNs_of_particular_c)!=1:        
+        for k in BN_avg.keys():
+            BN_avg[k] = 0*BN_avg[k]
+
+            for i in range(len(BNs_of_particular_c)):
+                BN_avg[k] += BNs_of_particular_c[i][k]
+
+            BN_avg[k] = torch.div(BN_avg[k], len(BNs_of_particular_c))
+                
+    return BN_avg
 
 def test_img(net_g, datatest, args):
     net_g.eval()

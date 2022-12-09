@@ -41,9 +41,13 @@ parser.add_argument('--log_all', action='store_true') # default: false
 parser.add_argument('--log_rate', type=float, default=0.1)
 parser.add_argument('--larg_lr', action='store_true') # default: false
 parser.add_argument('--KD', action='store_true') # default: false
+parser.add_argument('--test_worst', action='store_true') # default: false
+parser.add_argument('--dataset', type=str, default='cifar') # default: false
 
 parser.add_argument('--full_condition', action='store_true') # default: false
+parser.add_argument('--busy', action='store_true') # default: false
 parser.add_argument('--worst_three', action='store_true') # default: false
+parser.add_argument('--worst_two', action='store_true') # default: false
 parser.add_argument('--noFL', action='store_true', help='all dataset') # default: false
 parser.add_argument('--min_flex_num', type=int, default=0, help="0:0~ max(0,tc-args.min_flex_num)")
 parser.add_argument('--max_flex_num', type=int, default=4, help="0:~4 min(tc+args.max_flex_num+1,5)")
@@ -55,11 +59,11 @@ parser.add_argument('--num_experiment', type=int, default=3, help="the number of
 
 parser.add_argument('--submodels', type=str, default='000-012-553-665-777')
 # parser.add_argument('--decay', type=bool, default=False)
-parser.add_argument('--mode', type=str, default='normal')
+parser.add_argument('--mode', type=str, default='normal') # normal, worst, best
 parser.add_argument('--name', type=str, default='[no-name]')
 parser.add_argument('--rs', type=int, default=0)
 
-parser.add_argument('--save', type=str, default='/data/dv_fl_1125/')
+parser.add_argument('--save', type=str, default='/data/dv_fl_1209/')
 args = parser.parse_args()
 
 device = torch.device('cuda:' + str(args.gpu) if torch.cuda.is_available() else 'cpu')
@@ -77,13 +81,13 @@ def embed_param(w_glob, BN): # BN layer은 해당 p에 저장된 것을 가져�
 
 def main():
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    fileName = args.save + str(args.submodels) + '/resnet56_cifar_' + timestamp + '_' + str(args.rs)
+    fileName = args.save + str(args.submodels) + '/resnet56_svhn_' + timestamp + '_' + str(args.rs)
 
     if not os.path.exists(fileName):
         os.makedirs(fileName)
 
     if args.wandb:
-        run = wandb.init(dir=fileName, project='DVBN-FL-R56-1206', name= str(args.name)+ str(args.rs), reinit=True)
+        run = wandb.init(dir=fileName, project='DVBN-FL-R56-1209', name= str(args.name)+ str(args.rs), reinit=True)
         wandb.config.update(args)
     
     if args.model_name == 'resnet32':
@@ -115,6 +119,8 @@ def main():
             [ [[1, 6, 0, 0, 0, 0, 0, 2, 0], [1, 5, 0, 0, 0, 0, 3, 0, 0], [1, 5, 0, 0, 0, 0, 2, 0, 1]] ],
             [ [[1, 8, 0, 0, 0, 0, 0, 0, 0], [1, 8, 0, 0, 0, 0, 0, 0, 0], [1, 8, 0, 0, 0, 0, 0, 0, 0]] ]
             ]
+        if args.test_worst:
+            s2D[4] = [ [[1, 1, 0, 0, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0, 0, 0, 0]] ]
     else:
         for i in range(len(model_modes)):
             s2D.append(get_models(model_modes[i], args))
@@ -148,20 +154,24 @@ def main():
         for key in w.keys():
             if len(w[key].shape)<=1 and key!='linear.bias':
                 BN[key] = w[key]
-        BNs.append(BN)
+        BNs.append(copy.deepcopy(BN))
 
     w_glob = model.state_dict()
 
     com_layers = []  # common layers: conv1, bn1, linear
-    sing_layers = []  # singular layers: layer1.0.~
+    sing_layers = []  # singular layers: layer1.0.~ 
 
     for i in w_glob.keys():
         if 'layer' in i:
             sing_layers.append(i)
         else:
             com_layers.append(i)
-            
-    dataset_train, dataset_test = get_fl_cifar_datasets()
+    
+    if args.dataset == 'cifar':
+        dataset_train, dataset_test = get_fl_cifar_datasets()
+    elif args.dataset == 'svhn':
+        dataset_train, dataset_test = get_fl_svhn_datasets()
+
     dict_users = cifar_iid(dataset_train, args.num_users, args.rs)
     all_users = cifar_iid(dataset_train, 1, args.rs)
     logger = get_logger(logpath=os.path.join(fileName, 'logs'), filepath=os.path.abspath(__file__))
@@ -181,11 +191,14 @@ def main():
 
         if args.worst_three:
             idxs_users = np.random.choice(range(40,args.num_users), 6,replace=False)
+        elif args.worst_two:
+            idxs_users = np.random.choice(range(60,args.num_users), 4,replace=False)
         else:
             idxs_users = np.random.choice(range(args.num_users), m, replace=False)
         loss_locals = []
        
         w_locals = []
+        BN_locals = [[] for _ in range(submodel_num)]
 
         num_submodel = [0]*submodel_num  # num_submodel: number for each submodels at this round 
         num_submodel_sub = [0]*submodel_num
@@ -219,7 +232,10 @@ def main():
                     submodel 0 can execute all submodels (0 ~ 4)
                     0: 0,1,2 / 1: 1,2,3 / 2: 2,3,4 / 3: 3,4 / 4: 4
                     '''
-                    c = random.choice(list(range(max(0,tc-args.min_flex_num), min(tc+args.max_flex_num+1,5))))
+                    if args.busy:
+                        c = random.choice(list(range(0, tc+1)))
+                    else:
+                        c = random.choice(list(range(max(0,tc-args.min_flex_num), min(tc+args.max_flex_num+1,5))))
                     # c = random.choice(list(range(max(0,tc-2),tc+1)))
                     # c = random.choice(list(range(max(2,tc-2),tc+1)))
                 else:
@@ -261,7 +277,7 @@ def main():
                 w, BN_s, loss = local.train(net=local_models[c][model_choice], learning_rate=lr)
                 w_locals.append(copy.deepcopy(w))
             
-            BNs[c] = BN_s
+            BN_locals[c].append(copy.deepcopy(BN_s))
             loss_locals.append(copy.deepcopy(loss))
 
         # print(loss_locals)
@@ -270,17 +286,19 @@ def main():
             print(num_submodel_sub)
         
         w_glob = DVAvg(w_glob, w_locals, com_layers, sing_layers, subs2D)
-        model.load_state_dict(w_glob)
+        for ii in range(submodel_num):
+            if len(BN_locals[ii]) > 0:
+                BNs[ii] = BNAvg(BN_locals[ii])
 
+        model.load_state_dict(w_glob)
 
         loss_avg = sum(loss_locals) / len(loss_locals)
         print("round:{}, loss: {}".format(itr, loss_avg))
 
         if itr % 10 == 0:
-            itrl = int(itr/(5/args.local_ep))
             local_acc_test, local_loss_test = [[] for _ in range(submodel_num)], [[] for _ in range(submodel_num)]
             if args.mode == 'worst':
-                local_models[-1][0].load_state_dict(w_glob)
+                local_models[-1][0].load_state_dict(embed_param(w_glob, BNs[-1]))
                 local_acc_test, local_loss_test = test_img(local_models[-1][0], dataset_test, args)
                 logger.info("{:04d}".format(itr))
                 logger.info("G {:.4f}".format(local_acc_test))
@@ -290,7 +308,7 @@ def main():
                         "Global model test accuracy": local_acc_test
                     })
             elif args.mode == 'best':
-                local_models[0][0].load_state_dict(w_glob)
+                local_models[0][0].load_state_dict(embed_param(w_glob, BNs[0]))
                 local_acc_test, local_loss_test = test_img(local_models[0][0], dataset_test, args)
                 logger.info("{:04d}".format(itr))
                 logger.info("G {:.4f}".format(local_acc_test))
@@ -351,8 +369,15 @@ def main():
     print(fileName)
 
     if args.mode == 'worst':
-        st = submodel_num-1 # 4
-        en = st+1
+        if args.worst_three:
+            st = submodel_num-3
+            en = st+1
+        elif args.worst_two:
+            st = submodel_num-2
+            en = st+1
+        else:
+            st = submodel_num-1 # 4
+            en = st+1
     elif args.mode == 'best':
         st = 0
         en = st+1
@@ -372,9 +397,11 @@ def main():
                 idxs_users = np.random.choice(range(args.num_users), m, replace=False)
             else:
                 idxs_users = np.random.choice(range(0, (i+1)*20), (i+1)*2, replace=False) # range(0,3): 0~2
-            
+
             subs2D = []
             w_locals = []
+            BN_locals = [[] for _ in range(submodel_num)]
+
             for idx in idxs_users:
                 # print(idx, c)
                 # model_choice = int(np.random.choice(range(len(s2D[i])), 1)) # dynamic, if non-dynamic, only one models are loaded
@@ -394,11 +421,13 @@ def main():
                 
                 w, BN_s, loss = local.train(net=local_models[i][model_choice], learning_rate=lr)
                 w_locals.append(copy.deepcopy(w))
+                BN_locals[c].append(BN_s)
                 loss_locals.append(copy.deepcopy(loss))
-
-                BNs[c] = BN_s
             
             w_local_glob = DVAvg(w_local_glob, w_locals, com_layers, sing_layers, subs2D)
+            for ii in range(submodel_num):
+                if len(BN_locals[ii]) > 0:
+                    BNs[ii] = BNAvg(BN_locals[ii])
             local_models[i][model_choice].load_state_dict(embed_param(w_local_glob, BNs[i]))
             
             if (itrf+1) % 5 == 0:

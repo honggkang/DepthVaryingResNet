@@ -19,8 +19,8 @@ import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--nrounds', type=int, default=1)
-parser.add_argument('--nftrounds', type=int, default=5) # fine-tuning round
+parser.add_argument('--nrounds', type=int, default=500)
+parser.add_argument('--nftrounds', type=int, default=10) # fine-tuning round
 
 parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--data_aug', type=bool, default=True)
@@ -50,7 +50,7 @@ parser.add_argument('--max_flex_num', type=int, default=4, help="0:~4 min(tc+arg
 parser.add_argument('--model_set', type=int, default=2)
 parser.add_argument('--model_cluster_idx', type=int, default=4)
 parser.add_argument('--model_name', type=str, default='resnet56') # 34, 56, 110
-parser.add_argument('--wandb', type=bool, default=False)
+parser.add_argument('--wandb', type=bool, default=True)
 parser.add_argument('--num_experiment', type=int, default=3, help="the number of experiments")
 
 parser.add_argument('--submodels', type=str, default='000-012-553-665-777')
@@ -75,7 +75,7 @@ def embed_param(w_glob, BN): # BN layer은 해당 p에 저장된 것을 가져�
             w_sub[key] = BN[key]
     return w_sub
 
-def main():
+def main(logger):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     fileName = args.save + str(args.submodels) + '/resnet56_cifar_' + timestamp + '_' + str(args.rs)
 
@@ -85,6 +85,9 @@ def main():
     if args.wandb:
         run = wandb.init(dir=fileName, project='DVBN-FL-R56-1206', name= str(args.name)+ str(args.rs), reinit=True)
         wandb.config.update(args)
+
+    logger = get_logger(logpath=os.path.join(fileName, 'logs'), filepath=os.path.abspath(__file__))
+    logger.info(args)
     
     if args.model_name == 'resnet32':
         blocks = [5, 5, 5]
@@ -148,7 +151,7 @@ def main():
         for key in w.keys():
             if len(w[key].shape)<=1 and key!='linear.bias':
                 BN[key] = w[key]
-        BNs.append(BN)
+        BNs.append(copy.deepcopy(BN))
 
     w_glob = model.state_dict()
 
@@ -163,10 +166,7 @@ def main():
             
     dataset_train, dataset_test = get_fl_cifar_datasets()
     dict_users = cifar_iid(dataset_train, args.num_users, args.rs)
-
-        
-    logger = get_logger(logpath=os.path.join(fileName, 'logs'), filepath=os.path.abspath(__file__))
-    logger.info(args)
+       
     lr = args.lr
     
     for itr in range(1, args.nrounds+1): # communication round iteratin
@@ -184,6 +184,7 @@ def main():
         loss_locals = []
        
         w_locals = []
+        BN_locals = [[] for _ in range(submodel_num)]
 
         num_submodel = [0]*submodel_num  # num_submodel: number for each submodels at this round 
         num_submodel_sub = [0]*submodel_num
@@ -209,21 +210,24 @@ def main():
             w, BN_s, loss = local.train(net=local_models[c][model_choice], learning_rate=lr)
             w_locals.append(copy.deepcopy(w))
             
-            BNs[c] = BN_s
+            BN_locals[c].append(copy.deepcopy(BN_s))
             loss_locals.append(copy.deepcopy(loss))
 
         # print(loss_locals)
         print(num_submodel)
         
         w_glob = DVAvg(w_glob, w_locals, com_layers, sing_layers, subs2D)
-        model.load_state_dict(w_glob)
+        for ii in range(submodel_num):
+            if len(BN_locals[ii]) > 0:
+                BNs[ii] = BNAvg(BN_locals[ii])
 
+        model.load_state_dict(w_glob)
 
         loss_avg = sum(loss_locals) / len(loss_locals)
         print("round:{}, loss: {}".format(itr, loss_avg))
 
         if itr % 10 == 0:
-            local_models[c][0].load_state_dict(w_glob)
+            local_models[c][0].load_state_dict(embed_param(w_glob, BNs[c]))
             local_acc_test, local_loss_test = test_img(local_models[c][0], dataset_test, args)
             logger.info("{:04d}".format(itr))
             logger.info("G {:.4f}".format(local_acc_test))
@@ -232,7 +236,7 @@ def main():
                     "Communication round": itr,
                     "A model test accuracy": local_acc_test
                 })
-            
+        
     modelName = str(itr) + '.pth'
     torch.save({'state_dict': model.state_dict(), 'args': args, 'bns': BNs}, os.path.join(fileName, modelName))
     print(fileName)
@@ -246,6 +250,8 @@ def main():
         ###########################        
         subs2D = []
         w_locals = []
+        BN_locals = [[] for _ in range(submodel_num)]
+
         for idx in idxs_users:
             # print(idx, c)
             # model_choice = int(np.random.choice(range(len(s2D[i])), 1)) # dynamic, if non-dynamic, only one models are loaded
@@ -261,11 +267,14 @@ def main():
             
             w, BN_s, loss = local.train(net=local_models[c][model_choice], learning_rate=lr)
             w_locals.append(copy.deepcopy(w))
+            BN_locals[c].append(BN_s)
             loss_locals.append(copy.deepcopy(loss))
 
-            BNs[c] = BN_s
         
         w_local_glob = DVAvg(w_local_glob, w_locals, com_layers, sing_layers, subs2D)
+        for ii in range(submodel_num):
+            if len(BN_locals[ii]) > 0:
+                BNs[ii] = BNAvg(BN_locals[ii])
         local_models[c][model_choice].load_state_dict(embed_param(w_local_glob, BNs[c]))
         
         if (itrf+1) % 5 == 0:
@@ -277,13 +286,14 @@ def main():
                         "A model (F) " + str(c) + "-" + str(0) + " test accuracy": local_acc_test
                     })
     
-        if args.wandb:
-            run.finish()
+    if args.wandb:
+        run.finish()
     
     return
 
 if __name__ == "__main__":
     for i in range(args.num_experiment):
+        loggers = [0 for _ in range(args.num_experiment)]
         torch.manual_seed(args.rs)
         torch.cuda.manual_seed(args.rs)
         torch.cuda.manual_seed_all(args.rs) # if use multi-GPU
@@ -291,5 +301,5 @@ if __name__ == "__main__":
         # torch.backends.cudnn.benchmark = False
         np.random.seed(args.rs)
         random.seed(args.rs)
-        main()
+        main(loggers[i])
         args.rs = args.rs+1

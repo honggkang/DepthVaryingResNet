@@ -36,7 +36,7 @@ def get_logger(logpath, filepath, package_files=[], displaying=True, saving=True
     if saving:
         info_file_handler = logging.FileHandler(logpath, mode="a")
         info_file_handler.setLevel(level)
-        info_file_handler.terminator = ""
+        # info_file_handler.terminator = ""
         logger.addHandler(info_file_handler)
     if displaying:
         console_handler = logging.StreamHandler()
