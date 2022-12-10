@@ -6,6 +6,7 @@ import copy
 import torch
 from torch import nn, autograd
 import torch.nn.functional as F
+import pickle, os
 
 def model_string_change(asis, tobe, idx):
     mylist = list(asis)
@@ -410,9 +411,7 @@ def get_sd_models(mode, args):
     # ]
 
 
-
-
-def get_fl_cifar_datasets():
+def get_fl_cifar_datasets(dataset_name):
     transform_train = transforms.Compose([
                 transforms.RandomCrop(32, padding=4),
                 transforms.RandomHorizontalFlip(p=0.5),
@@ -425,8 +424,12 @@ def get_fl_cifar_datasets():
                 transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
             ])
 
-    dataset_train = datasets.CIFAR10('.data/cifar', train=True, download=True, transform=transform_train) # augmentation on client should be implemented
-    dataset_test = datasets.CIFAR10('.data/cifar', train=False, download=True, transform=transform_test)
+    if dataset_name == 'cifar10':
+        dataset_train = datasets.CIFAR10('.data/cifar', train=True, download=True, transform=transform_train) # augmentation on client should be implemented
+        dataset_test = datasets.CIFAR10('.data/cifar', train=False, download=True, transform=transform_test)
+    elif dataset_name == 'cifar100':
+        dataset_train = datasets.CIFAR100('.data/cifar', train=True, download=True, transform=transform_train)
+        dataset_test = datasets.CIFAR100('.data/cifar', train=False, download=True, transform=transform_test)
 
     return dataset_train, dataset_test
 
@@ -478,6 +481,71 @@ def get_fl_svhn_datasets():
     dataset_test = datasets.SVHN(root='.data/svhn', split='train', download=True, transform=transform_test)
 
     return dataset_train, dataset_test
+
+def unpickle(file):
+    with open(file, 'rb') as fo:
+        dict = pickle.load(fo)
+    return dict
+
+def load_databatch(data_folder, idx, img_size=32):
+    data_file = os.path.join(data_folder, 'train_data_batch_')
+
+    d = unpickle(data_file + str(idx))
+    x = d['data']
+    y = d['labels']
+    mean_image = d['mean']
+
+    x = x/np.float32(255)
+    mean_image = mean_image/np.float32(255)
+
+    # Labels are indexed from 1, shift it so that indexes start at 0
+    y = [i-1 for i in y]
+    data_size = x.shape[0]
+
+    x -= mean_image
+
+    img_size2 = img_size * img_size
+
+    x = np.dstack((x[:, :img_size2], x[:, img_size2:2*img_size2], x[:, 2*img_size2:]))
+    x = x.reshape((x.shape[0], img_size, img_size, 3)).transpose(0, 3, 1, 2)
+
+    # create mirrored images
+    X_train = x[0:data_size, :, :, :]
+    Y_train = y[0:data_size]
+    X_train_flip = X_train[:, :, :, ::-1]
+    Y_train_flip = Y_train
+    X_train = np.concatenate((X_train, X_train_flip), axis=0)
+    Y_train = np.concatenate((Y_train, Y_train_flip), axis=0)
+
+    return dict(
+        X_train=lasagne.utils.floatX(X_train),
+        Y_train=Y_train.astype('int32'),
+        mean=mean_image)
+
+def get_fl_imagenet_datasets():
+
+    traindir='/data/imageNet/train'
+    valdir='/data/imageNet/val'
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],std=[0.229, 0.224, 0.225])
+    train_dataset = datasets.ImageNet(
+        traindir,
+        transform=transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            # transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize,
+        ]))
+    val_dataset = datasets.ImageNet(
+        valdir,
+        transform=transforms.Compose([
+            # transforms.Resize(256),
+            # transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            normalize,
+        ]))
+    
+    return train_dataset, val_dataset
 
 def count_param(step_vector):
     paramNum = 1114 # ResNet 18

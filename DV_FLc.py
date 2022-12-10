@@ -42,7 +42,7 @@ parser.add_argument('--log_rate', type=float, default=0.1)
 parser.add_argument('--larg_lr', action='store_true') # default: false
 parser.add_argument('--KD', action='store_true') # default: false
 parser.add_argument('--test_worst', action='store_true') # default: false
-parser.add_argument('--dataset', type=str, default='cifar') # default: false
+parser.add_argument('--dataset', type=str, default='cifar10') # default: false
 
 parser.add_argument('--full_condition', action='store_true') # default: false
 parser.add_argument('--busy', action='store_true') # default: false
@@ -81,7 +81,7 @@ def embed_param(w_glob, BN): # BN layer은 해당 p에 저장된 것을 가져�
 
 def main():
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    fileName = args.save + str(args.submodels) + '/resnet56_svhn_' + timestamp + '_' + str(args.rs)
+    fileName = args.save + str(args.submodels) + '/resnet56_cifar100_' + timestamp + '_' + str(args.rs)
 
     if not os.path.exists(fileName):
         os.makedirs(fileName)
@@ -103,7 +103,10 @@ def main():
     if args.model_name == 'resnet32':
         model = resnet32(full_stepSize).to(device) # global model
     elif args.model_name == 'resnet56':
-        model = resnet56(full_stepSize).to(device) # global model
+        if args.dataset == 'cifar100':
+            model = resnet56_100(full_stepSize).to(device)
+        else:
+            model = resnet56(full_stepSize).to(device) # global model
     elif args.model_name == 'resnet110':
         model = resnet110(full_stepSize).to(device) # global model
     # torchsummary.summary(model, (3, 32, 32))
@@ -142,7 +145,10 @@ def main():
                 local_models[i].append(resnet32(s2D[i][j]).to(device))
             elif args.model_name == 'resnet56':
                 print(j, end=" ")
-                local_models[i].append(resnet56(s2D[i][j]).to(device))
+                if args.dataset == 'cifar100':
+                    local_models[i].append(resnet56_100(s2D[i][j]).to(device))
+                else:
+                    local_models[i].append(resnet56(s2D[i][j]).to(device))
             elif args.model_name == 'resnet110':
                 print(j, end=" ")
                 local_models[i].append(resnet110(s2D[i][j]).to(device))
@@ -167,10 +173,13 @@ def main():
         else:
             com_layers.append(i)
     
-    if args.dataset == 'cifar':
-        dataset_train, dataset_test = get_fl_cifar_datasets()
+    if 'cifar' in args.dataset:
+        dataset_train, dataset_test = get_fl_cifar_datasets(args.dataset)
     elif args.dataset == 'svhn':
         dataset_train, dataset_test = get_fl_svhn_datasets()
+    elif args.dataset == 'imagenet':
+        dataset_train, dataset_test = get_fl_imagenet_datasets()
+
 
     dict_users = cifar_iid(dataset_train, args.num_users, args.rs)
     all_users = cifar_iid(dataset_train, 1, args.rs)
@@ -369,15 +378,17 @@ def main():
     print(fileName)
 
     if args.mode == 'worst':
-        if args.worst_three:
-            st = submodel_num-3
-            en = st+1
-        elif args.worst_two:
-            st = submodel_num-2
-            en = st+1
-        else:
-            st = submodel_num-1 # 4
-            en = st+1
+        # if args.worst_three:
+        #     st = submodel_num-3
+        #     en = st+1
+        # elif args.worst_two:
+        #     st = submodel_num-2
+        #     en = st+1
+        # else:
+        #     st = submodel_num-1 # 4
+        #     en = st+1
+        st = submodel_num-1 # 4
+        en = st+1
     elif args.mode == 'best':
         st = 0
         en = st+1
